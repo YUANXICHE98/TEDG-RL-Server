@@ -1,0 +1,25 @@
+embedding:
+  api_key: ${EMBEDDING_API_KEY}
+  base_url: https://api.openai-hk.com/v1
+  dim: 1536
+  model: text-embedding-3-large
+hypergraph:
+  embedding_cache: data/cache/hypergraph_embedding_index.pkl
+  file: data/hypergraph/hypergraph_complete_real.json
+  mixed_embedding_cache: data/cache/hypergraph_mixed_embedding.pkl
+llm:
+  api_key: ${OPENAI_API_KEY}
+  model: gpt-4-turbo-preview
+nle:
+  character: mon-hum-neu-mal
+  max_steps: 1000
+  savedir: results/nle_episodes
+rl:
+  batch_size: 64
+  gamma: 0.99
+  learning_rate: 0.0003
+  num_episodes: 1000
+  max_steps: 1000
+  hidden_dim: 128
+  clip_ratio: 0.2
+  buffer_size: 10000

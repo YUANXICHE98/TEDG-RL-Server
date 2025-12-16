@@ -1,0 +1,320 @@
+{
+  "RL_Algorithm_Training_Learning": {
+    "RL算法推荐": {
+      "首选算法": {
+        "名称": "PPO (Proximal Policy Optimization)",
+        "原因": [
+          "Action masking 支持友好，可以直接mask超图不可行动作",
+          "Sample efficiency 高，适合游戏环境",
+          "稳定性好，单调改进保证",
+          "易于实现和调试多通道架构"
+        ],
+        "超参数": {
+          "学习率": "3e-4",
+          "clip范围": "0.2",
+          "GAE lambda": "0.95",
+          "PPO epoch": "3-5",
+          "batch size": "128-256"
+        },
+        "多通道特化": {
+          "actor网络数量": "4个独立actor (actor_pre, actor_scene, actor_effect, actor_rule)",
+          "attention网络": "1个AttentionWeightNet，输出α权重",
+          "critic网络": "1个共享critic"
+        }
+      },
+      "备选算法": {
+        "DQN (带action masking)": {
+          "原因": "更简单，如果PPO太复杂可以先用DQN原型",
+          "缺点": "样本效率略低于PPO"
+        },
+        "A3C (Asynchronous Advantage Actor-Critic)": {
+          "原因": "如果需要并行训练多个环境实例",
+          "适用": "大规模训练"
+        }
+      }
+    },
+    "如何训练": {
+      "阶段1_初始化": [
+        "1. 初始化4个actor网络和attention网络",
+        "2. 用均匀初始化α = [0.25, 0.25, 0.25, 0.25]",
+        "3. 初始化critic网络为0（无偏估计）"
+      ],
+      "阶段2_数据收集": [
+        "1. 运行环境，收集 (state, action, reward, next_state, done) 轨迹",
+        "2. state = [belief_vector(50), q_pre(15), q_scene(15), q_effect(8), q_rule(10), confidence(1), goal_embedding(16)]",
+        "3. 记录每条轨迹的长期回报 G_t",
+        "4. 每条轨迹计算GAE advantage A_t = G_t - V(s_t)"
+      ],
+      "阶段3_模型更新": [
+        "1. 构建mini-batch，包含多条轨迹的数据",
+        "2. Forward pass:",
+        "   - 通过4个独立actor网络计算logits",
+        "   - 通过attention网络计算α权重",
+        "   - 融合: fused_logits = sum(α_i * logits_i)",
+        "3. Backward pass:",
+        "   - Actor loss: -log(π(a|s)) * advantage",
+        "   - Critic loss: MSE(V_pred - G_t)",
+        "   - 梯度流向4个actor和attention网络",
+        "4. 用PPO clip保证单调改进"
+      ],
+      "阶段4_评估": [
+        "1. 每N个episode，在测试环境评估不更新参数",
+        "2. 记录指标:",
+        "   - 平均回报",
+        "   - 平均episode长度",
+        "   - Query动作的比例（应该低于30%）",
+        "   - α权重的分布（是否过度依赖某个通路）"
+      ],
+      "阶段5_超参数调优": [
+        "1. 如果Q-LOSS不下降：降低critic学习率",
+        "2. 如果策略变化太剧烈：增加clip范围到0.3",
+        "3. 如果探索不足：增加entropy bonus",
+        "4. 如果某个通路梯度爆炸：加梯度裁剪"
+      ]
+    },
+    "RL学习的三要素": {
+      "1_状态表示 (State)": {
+        "定义": "state = [belief_vector, q_pre, q_scene, q_effect, q_rule, confidence, goal]",
+        "维度": "[50, 15, 15, 8, 10, 1, 16] = 115 维",
+        "来源": [
+          "belief_vector(50): 从证据图G_E^(t)提取的玩家状态",
+          "q_pre(15): 超图前置条件通路的嵌入",
+          "q_scene(15): 超图场景原子通路的嵌入",
+          "q_effect(8): 超图效果/风险通路的嵌入",
+          "q_rule(10): 超图规则模式通路的嵌入",
+          "confidence(1): 场景匹配的置信度",
+          "goal_embedding(16): LLM识别的中期目标"
+        ],
+        "重要性": "state质量决定RL学习效率，多通道设计能保留95%信息"
+      },
+      "2_动作空间 (Action)": {
+        "定义": "两个分支，都由RL选择",
+        "高置信分支": {
+          "条件": "confidence >= 0.78",
+          "动作数": "6-10个",
+          "来源": "超图给出的可行动作子图",
+          "特点": "RL学会在这些动作中的优先级排序"
+        },
+        "低置信分支": {
+          "条件": "confidence < 0.78",
+          "动作数": "4个查询策略",
+          "包括": [
+            "query_property: 询问物体属性（LLM，100-500 token）",
+            "safe_exploration: 安全探测（超图，0 token）",
+            "llm_reflection: 完整情景反思（LLM，1000+ token）",
+            "wait: 等待环境提供信息（1步时间）"
+          ],
+          "特点": "RL学会选择最cost-effective的查询方式"
+        },
+        "Action Masking": "超图永远mask物理不可行动作，硬约束不可违反"
+      },
+      "3_奖励设计 (Reward)": {
+        "定义": "多分量加权的dense reward",
+        "公式": "r = w_prog*r_progress + w_safe*r_safety + w_eff*r_efficiency + w_feas*r_feasibility + w_exp*r_exploration",
+        "分量详解": {
+          "r_progress (权重0.3)": {
+            "含义": "向下楼探索的进展",
+            "计算": "dlvl变化 + 关键任务完成度",
+            "范围": "[-1, +1]"
+          },
+          "r_safety (权重0.3)": {
+            "含义": "避免致命错误",
+            "计算": "(-1000)*死亡 + (-100)*血量大幅下降 + (-0.1)*(1-safety_score)",
+            "范围": "[-1000, +0.1]"
+          },
+          "r_efficiency (权重0.2)": {
+            "含义": "最少步数到达目标",
+            "计算": "-步数/1000 + 奖励完成时的快速度",
+            "范围": "[-0.1, +0.1]"
+          },
+          "r_feasibility (权重0.1)": {
+            "含义": "遵循超图规则",
+            "计算": "(-0.2)*违反前置条件 + (-0.3)*触发高风险失败模式 + (+0.05)*正常选择",
+            "范围": "[-0.3, +0.05]"
+          },
+          "r_exploration (权重0.1)": {
+            "含义": "在安全前提下探索新分支",
+            "计算": "(+0.15)*发现新conditional_effect + (+0.1)*进入新房间",
+            "范围": "[0, +0.15]"
+          }
+        },
+        "多通道的梯度反馈": {
+          "r_progress": "全局，所有通路都接收",
+          "r_safety": "主要→q_effect，也反馈→q_pre",
+          "r_efficiency": "全局",
+          "r_feasibility": "主要→q_pre和q_rule",
+          "r_exploration": "主要→q_scene"
+        }
+      }
+    }
+  },
+  "Hypergraph_Embedding_Forms": {
+    "超图嵌入的四个通路": {
+      "通路1_前置条件通路 (q_pre, 15维)": {
+        "输入": {
+          "节点类型": "pre_nodes",
+          "具体例子": [
+            "has_gold",
+            "hunger_normal",
+            "hp_full",
+            "power_empty",
+            "confused",
+            "blind",
+            "stunned"
+          ],
+          "数量": "~30个不同的前置条件节点"
+        },
+        "编码方式": "HGNN两阶段聚合",
+        "聚合逻辑": [
+          "第一阶段（节点到超边）: 把所有前置条件节点聚合",
+          "  - 学习：'which pre-conditions are compatible'",
+          "  - 例如：has_gold+hp_full 比单独has_gold更有意义",
+          "第二阶段（超边到特征）: 反馈回特征向量",
+          "  - 输出q_pre(15维) 体现当前前置条件的充分性"
+        ],
+        "输出": "q_pre ∈ R^15，语义向量，体现前置条件状态",
+        "作用于RL": "actor_pre读q_pre，判断'前置条件是否合理'"
+      },
+      "通路2_场景原子通路 (q_scene, 15维)": {
+        "输入": {
+          "节点类型": "scene_atoms",
+          "具体例子": [
+            "dlvl_1至36",
+            "in_shop",
+            "in_altar",
+            "near_gold_vault",
+            "monsters_present",
+            "ac_poor/good",
+            "in_room"
+          ],
+          "数量": "~40个不同的场景原子"
+        },
+        "编码方式": "HGNN两阶段聚合",
+        "聚合逻辑": [
+          "第一阶段: 聚合场景原子之间的关系",
+          "  - 学习：'which scene atoms are compatible'",
+          "  - 例如：in_shop + monsters_present 是异常组合",
+          "第二阶段: 反馈回特征向量",
+          "  - 输出q_scene(15维) 体现当前环境的特性"
+        ],
+        "输出": "q_scene ∈ R^15，语义向量，体现场景理解",
+        "作用于RL": "actor_scene读q_scene，判断'环境下的安全性'"
+      },
+      "通路3_效果和风险通路 (q_effect, 8维)": {
+        "输入": {
+          "数据类型": "效果元数据",
+          "具体包括": [
+            "eff_nodes: [ate_food, hunger_satisfied, hit, combat_success, ...]",
+            "success_probability: 0.0-1.0 (从450超边统计)",
+            "safety_score: 0.0-1.0 (从failure_modes计算)",
+            "failure_modes: {precondition_violation: count, bad_aim: count, ...}"
+          ]
+        },
+        "编码方式": "MLP + Dense层",
+        "处理逻辑": [
+          "第一步: 把eff_nodes嵌入成向量",
+          "第二步: 用MLP学习success_prob和safety_score的关系",
+          "  - 输入: [eff_embedding, success_prob, safety_score, failure_mode_counts]",
+          "  - 隐藏层: ReLU(d=64)",
+          "  - 输出: q_effect(8维)",
+          "含义: 量化'成功率高但风险也大'这样的trade-off"
+        ],
+        "输出": "q_effect ∈ R^8，量化向量，体现风险-收益权衡",
+        "作用于RL": "actor_effect读q_effect，判断'值不值得冒险'"
+      },
+      "通路4_规则模式通路 (q_rule, 10维)": {
+        "输入": {
+          "数据类型": "条件效果和规则",
+          "具体包括": [
+            "conditional_effects列表: [if item.blessed then got_blessed, ...]",
+            "failure_modes的完整类型分类",
+            "rule_patterns: 50个网络协议规则"
+          ]
+        },
+        "编码方式": "RuleEncoder + Embedding",
+        "处理逻辑": [
+          "第一步: 对每个conditional_effect做符号编码",
+          "  - if-then关系 → 图结构",
+          "  - condition节点 + effect节点 + 有向边",
+          "第二步: 用RuleEncoder学习这个图",
+          "  - 输入: 条件效果的依赖图",
+          "  - 处理: 排列不变的聚合",
+          "  - 输出: q_rule(10维)",
+          "含义: 编码'隐藏的机制和陷阱'"
+        ],
+        "输出": "q_rule ∈ R^10，规则向量，体现隐藏效果",
+        "作用于RL": "actor_rule读q_rule，判断'有没有隐藏陷阱'"
+      }
+    },
+    "超图嵌入的融合层": {
+      "名称": "MultiHeadAttention Fusion Layer",
+      "输入": "4个通路的嵌入: [q_pre(15), q_scene(15), q_effect(8), q_rule(10)]",
+      "处理流程": [
+        "1. 拼接: [q_pre, q_scene, q_effect, q_rule] → 48维向量",
+        "2. AttentionWeightNet: 48维 → 4维",
+        "   - 输入包含: state的其他部分(belief, confidence, goal)",
+        "   - 隐藏层: ReLU(d=64)",
+        "   - 输出: logits[4]",
+        "3. Softmax: logits[4] → α ∈ [0,1]^4, sum(α)=1",
+        "4. 加权融合: q_fused = α_pre*q_pre_normalized + α_scene*q_scene_normalized + ...",
+        "5. 输出: q_fused ∈ R^20"
+      ],
+      "α权重的含义": "RL根据当前state学到的'应该信任哪个通路'的度量",
+      "动态性": "α随state变化，同一个超边在不同情景下可能有不同权重"
+    },
+    "完整的超图嵌入流程": {
+      "输入": {
+        "来源": "LLM Grounding + 游戏状态观测",
+        "具体": [
+          "pre_nodes: has_gold, hunger_normal, ... (boolean/one-hot)",
+          "scene_atoms: dlvl_5, in_shop, ... (boolean/one-hot)",
+          "eff_metadata: {success_prob, safety_score, failure_modes, ...}",
+          "conditional_effects: [if X then Y, ...]"
+        ]
+      },
+      "处理步骤": [
+        "Step 1: 四个独立的通路同时处理",
+        "  - pre_nodes → HGNN → q_pre(15)",
+        "  - scene_atoms → HGNN → q_scene(15)",
+        "  - eff_metadata → MLP → q_effect(8)",
+        "  - conditional_effects → RuleEncoder → q_rule(10)",
+        "",
+        "Step 2: 融合层计算α权重",
+        "  - 输入: [belief_vector, q_*, confidence, goal_embedding]",
+        "  - AttentionWeightNet → α[4]",
+        "",
+        "Step 3: 加权融合产生q_fused",
+        "  - q_fused = α_pre*normalize(q_pre) + ...",
+        "  - 输出: q_fused(20维)",
+        "",
+        "Step 4: 构造完整state向量",
+        "  - state = [belief_vector(50), q_pre(15), q_scene(15), q_effect(8), q_rule(10), confidence(1), goal_embedding(16)]",
+        "  - 总维度: 115维"
+      ],
+      "时间复杂度": "O(通路的嵌入时间) + O(attention融合) ≈ O(HGNN处理450超边) ≈ 毫秒级",
+      "空间复杂度": "O(4个通路的参数) ≈ 中等，显著小于单个大网络"
+    },
+    "超图嵌入的数据来源": {
+      "静态数据": {
+        "来源": "NetHack源代码 + NLD/NAO离线轨迹",
+        "包括": [
+          "450个超边定义（前置条件、效果、失败模式）",
+          "33个操作符的规则编码",
+          "204个变体的统计数据",
+          "50个网络规则（来自源代码）"
+        ],
+        "更新频率": "离线，不在运行时改变"
+      },
+      "动态数据": {
+        "来源": "运行时LLM Grounding",
+        "包括": [
+          "当前frame的pre_nodes (computed from belief_vector)",
+          "当前frame的scene_atoms (LLM识别)",
+          "confidence分数 (超图子图匹配度)",
+          "goal_embedding (LLM识别的中期目标)"
+        ],
+        "更新频率": "每个游戏step，一次性计算"
+      }
+    }
+  }
+}

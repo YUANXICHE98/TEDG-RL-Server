@@ -1,0 +1,141 @@
+{
+  "标题": "多通道嵌入超图 + RL 设计（直观版）",
+  "核心思想": "不改变三角结构（LLM → 超图 → RL），而是让超图的信息流变成'4条平行的通路'而非'1条黑盒通道'。",
+  "2.1_谁负责什么_多通道版本": {
+    "静态任务超图_G_T": {
+      "原始职责": "编码规则和条件（哪些动作在什么pre条件下可行，成功/失败概率，副作用，解锁后续operator）",
+      "多通道升级": "把这些信息分成4条平行的通路，不是硬硬地压成1个hash",
+      "具体分工": {
+        "通路1_前置条件编码": {
+          "负责": "编码'这些动作各自需要什么前置条件'",
+          "输入": "pre_nodes: has_gold, hunger_normal, hp_full, power_empty, confused, ...",
+          "处理": "HGNN学习这些前置条件之间的依赖关系和组合",
+          "输出": "q_pre(15dim) - 一个语义向量，体现前置条件的结构",
+          "作用于": "RL决策时，RL看q_pre就知道'当前前置条件组合是否合理'"
+        },
+        "通路2_场景原子编码": {
+          "负责": "编码'当前场景环境下各动作的可行性'",
+          "输入": "scene_atoms: dlvl_5, in_shop, monsters_present, ac_poor, ...",
+          "处理": "HGNN学习场景之间的冲突和相容关系（如'shop+monsters'是异常组合）",
+          "输出": "q_scene(15dim) - 一个语义向量，体现场景的结构",
+          "作用于": "RL决策时，RL看q_scene就知道'这个环境下什么动作最安全'"
+        },
+        "通路3_效果和风险编码": {
+          "负责": "编码'各动作的后果和风险等级'",
+          "输入": "eff_nodes, success_probability, safety_score, failure_modes{bad_aim: 1268, need_unlock: 9, ...}",
+          "处理": "MLP学习risk/benefit的权衡",
+          "输出": "q_effect(8dim) - 一个向量，量化'成功率虽高但风险大'这样的复杂信息",
+          "作用于": "RL决策时，RL看q_effect就知道'这个动作值不值得冒险'"
+        },
+        "通路4_规则模式编码": {
+          "负责": "编码'隐藏的conditional effects和规则约束'",
+          "输入": "conditional_effects: if item.blessed then got_blessed, if ate_confusing_food then became_confused, ...",
+          "处理": "RuleEncoder学习这些if-then模式",
+          "输出": "q_rule(10dim) - 一个向量，编码'我们不知道的陷阱和机制'",
+          "作用于": "RL决策时，当confidence低时，RL会提高对q_rule的重视"
+        }
+      }
+    },
+    "LLM_Grounding_Reasoner": {
+      "原始职责": "把复杂观测→场景原子，低置信时反思",
+      "多通道升级": "产出的scene_atoms质量决定了q_scene的质量，产出的动作评估质量决定了是否进入QUERY模式",
+      "具体流程": "LLM把观测groundingd成scene_atoms → q_scene直接使用这些atoms → q_scene质量好，RL_FAST成功率就高"
+    },
+    "RL小模型_DQN_PPO": {
+      "原始职责": "在2-6个masked动作里学会trade-off",
+      "多通道升级": "不只是在'动作空间'上做trade-off，还在'4条通路的加权'上做trade-off",
+      "具体含义": [
+        "高置信时(confidence >= 0.78): RL学会α = [0.25, 0.25, 0.25, 0.25]这样的均衡权重",
+        "低血量时(hp < 30%): RL学会α = [0.2, 0.15, 0.5, 0.15]这样的'安全优先'权重",
+        "未知物体时: RL学会α = [0.15, 0.2, 0.3, 0.35]这样的'规则优先'权重",
+        "→ RL不是在学'选哪个动作'，而是在学'在这个情景下，什么信息最关键、应该听谁的话'"
+      ]
+    }
+  },
+  "2.2_RL的状态和动作_多通道版本": {
+    "状态_State_": {
+      "原始": "state = [belief_vector(50), subgraph_hash(10), goal_embedding(16)] = 76dim",
+      "问题": "subgraph_hash(10dim)是黑盒，把4条通路压成1条，信息损失严重",
+      "多通道升级": "state = [belief_vector(50), q_pre(15), q_scene(15), q_effect(8), q_rule(10), confidence(1), goal_embedding(16)] = 105dim",
+      "关键变化": {
+        "用多个白盒通路替代黑盒hash": {
+          "原来": "subgraph_hash(10) 是什么？nobody knows。",
+          "现在": "q_pre(15)来自前置条件，q_scene(15)来自场景，q_effect(8)来自风险，q_rule(10)来自规则。每个都清晰。",
+          "效果": "信息损失从30% → 5%"
+        },
+        "confidence不只是二值开关，而是融合层的调节信号": {
+          "原来": "confidence >= 0.78 ? RL_FAST : QUERY (二值判断)",
+          "现在": "confidence值直接影响注意力权重α的计算",
+          "例子": "\n                    confidence = 0.95 → attention_net输出: α ≈ [0.3, 0.3, 0.15, 0.25]\n                    confidence = 0.6  → attention_net输出: α ≈ [0.15, 0.15, 0.3, 0.4]\n                    confidence = 0.2  → attention_net输出: α ≈ [0.1, 0.1, 0.3, 0.5]\n\n                    即：confidence低时，自动加强对q_rule和q_effect的重视\n                    "
+        }
+      },
+      "本质变化": "从'把多条信息线硬压成1条'变成'保持多条信息线，动态学会怎么加权融合'"
+    },
+    "动作_Action_": {
+      "原始": "两个分支：RL_FAST(6-10动作) 和 QUERY(4个查询类动作)",
+      "多通道升级": "同样的两个分支，但动作评分的来源变了",
+      "RL_FAST分支_详细变化": {
+        "原始流程": "state(76) → actor_network → logits[6-10] → sample",
+        "多通道流程": "\n                state(105) 包含 [q_pre(15), q_scene(15), q_effect(8), q_rule(10)]\n                    ↓\n                actor_pre:   q_pre + belief_context(20) → logits_pre[6-10]\n                actor_scene: q_scene + location_context(20) → logits_scene[6-10]\n                actor_effect: q_effect + hp_context(10) → logits_effect[6-10]\n                actor_rule: q_rule + inventory_context(15) → logits_rule[6-10]\n                    ↓\n                attention_network计算权重: α = softmax([w_pre, w_scene, w_effect, w_rule])\n                    ↓\n                融合: fused_logits = α_pre*logits_pre + α_scene*logits_scene + α_effect*logits_effect + α_rule*logits_rule\n                    ↓\n                softmax & sample\n                ",
+        "改变的含义": "不是单个actor在猜测，而是4个actor分别说意见，再用动态权重投票"
+      },
+      "QUERY分支_详细变化": {
+        "原始": "confidence < 0.78 时，action空间变成 [query_property, safe_exploration, llm_reflection, wait]",
+        "多通道": "同样的4个查询动作，但RL学会在什么情景下选哪个时，会直接看α的构成",
+        "例子": "\n                如果当前 α_rule(0.4) 和 α_effect(0.35) 都很高：\n                  → RL学到：这说明'规则和风险都不确定'\n                  → 应该选 query_property 或 safe_exploration\n\n                如果当前 α_pre(0.4) 很高但 α_rule(0.1)：\n                  → RL学到：这说明'前置条件不清楚，但规则较明确'\n                  → 应该选 wait (等待更多信息来理解当前前置条件)\n                "
+      }
+    }
+  },
+  "2.3_奖励设计_多通道版本": {
+    "原始": "reward = w1*progress + w2*safety + w3*efficiency + w4*feasibility + w5*exploration",
+    "多通道升级": "奖励的来源更加'多通道化'，每个通路独立接收奖励梯度",
+    "具体变化": {
+      "通路级别的奖励反馈": {
+        "q_pre接收的梯度来自": [
+          "r_feasibility: 是否违反了前置条件约束（-0.1 if violated）",
+          "r_progress: 是否向目标接近（取决于是否在应该的pre_condition下行动）"
+        ],
+        "q_scene接收的梯度来自": [
+          "r_safety: 场景下的安全性评估（in_shop时，+0.2 if wait/move，-0.3 if fight_monsters）",
+          "r_efficiency: 场景优化的路径选择"
+        ],
+        "q_effect接收的梯度来自": [
+          "r_safety: 危险程度（safety_score低时，选safe_action给+0.1）",
+          "r_efficiency: 高效率（短步数到达目标给+0.1）"
+        ],
+        "q_rule接收的梯度来自": [
+          "r_information: 发现新的conditional_effect给+0.15",
+          "r_safety: 触发了隐藏陷阱给-0.5"
+        ]
+      },
+      "α权重学习的梯度": "\n            每个actor的梯度不仅改进该actor本身，还会改进对应通路的α权重。\n\n            如果q_effect给出的建议经常正确（平均奖励高）：\n              → α_effect的梯度会增加 → 下次会更相信q_effect\n\n            如果q_pre给出的建议经常错误：\n              → α_pre的梯度会减少 → 下次会降低对q_pre的信任度\n            "
+    },
+    "本质": "从'全局single scalar reward'变成'每条通路都收到反馈，学会互相trust'"
+  },
+  "2.4_和大模型直接决策的对比_多通道版本": {
+    "LLM直接决策": "每一步LLM想，高token消耗，容易规则错误",
+    "单通道TEDG+RL": [
+      "LLM一次Grounding → state(76dim黑盒hash)",
+      "超图+RL高置信快速决策",
+      "低置信回LLM反思"
+    ],
+    "多通道TEDG+RL": [
+      "LLM一次Grounding → 4条信息线(q_pre, q_scene, q_effect, q_rule)",
+      "超图4个通路并行处理 + attention融合",
+      "RL学会'怎么加权这4条信息'",
+      "高置信(各通路agreement高): RL快速决策，0 token",
+      "低置信(各通路分歧): RL自动提高q_rule权重，或选择safe_exploration",
+      "极低置信(agreement远低): LLM反思 + 查询策略"
+    ],
+    "直观对比": {
+      "LLM": "什么都能想，什么都要想，很聪明但很慢",
+      "单通道": "快多了，但信息损失严重",
+      "多通道": "快（同单通道），而且信息完整，RL学会了'在什么情景下信任什么信息'"
+    }
+  },
+  "核心洞察": {
+    "单通道的问题": "\n        state = [belief_vector(50), subgraph_hash(10黑盒), goal_embedding(16)]\n\n        问题：\n        1. subgraph_hash把超图的4个方面强行压成10维\n        2. actor无法理解'为什么推荐这个超边'\n        3. 梯度路径混乱：是q_pre的梯度还是q_scene的梯度？不知道\n        4. 信息损失严重：30%的信息永远丢失了\n        ",
+    "多通道的改进": "\n        state = [belief_vector(50), q_pre(15), q_scene(15), q_effect(8), q_rule(10), confidence(1), goal_embedding(16)]\n\n        改进：\n        1. 4个通路分离，不压缩\n        2. actor明确看到'前置条件、场景、效果、规则'分别说什么\n        3. 梯度路径清晰：每个通路独立接收梯度\n        4. 信息保真度高：各通路都是白盒，信息损失<5%\n        5. 可视化：α权重直观显示'当前相信哪条通路'\n        ",
+    "最巧妙的融合": "\n        α = [α_pre, α_scene, α_effect, α_rule]\n\n        这不只是'参数权重'，而是：\n        1. RL根据反馈学会的'当前应该信任谁'的度量\n        2. 超图可以根据α的变化'理解RL遇到了什么问题'\n        3. 当α_rule突然升高时，超图知道RL在'不确定隐藏规则'\n        4. 当α_effect升高时，超图知道RL在'谨慎评估风险'\n\n        这就是RL和超图的双向反馈环。\n        "
+  }
+}
