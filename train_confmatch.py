@@ -1035,6 +1035,34 @@ def main():
     if verbose_step_mode:
         print("\n⚠️ 超详细日志模式已启用（TEDG_VERBOSE_STEP=1）")
 
+    # 检查是否需要恢复 checkpoint
+    resume_path = None
+    if len(sys.argv) > 1 and sys.argv[1] == "--resume" and len(sys.argv) > 2:
+        resume_path = sys.argv[2]
+        if os.path.exists(resume_path):
+            print_step(8, f"恢复 checkpoint: {resume_path}")
+            checkpoint = torch.load(resume_path, map_location=device)
+            # 支持不同的 checkpoint 格式
+            if "model_state_dict" in checkpoint:
+                policy_net.load_state_dict(checkpoint["model_state_dict"])
+            elif "policy_net" in checkpoint:
+                policy_net.load_state_dict(checkpoint["policy_net"])
+            elif "state_dict" in checkpoint:
+                policy_net.load_state_dict(checkpoint["state_dict"])
+            else:
+                print(f"  ⚠️ 未找到模型权重，checkpoint keys: {list(checkpoint.keys())}")
+                resume_path = None
+            if "optimizer_state_dict" in checkpoint and hasattr(trainer, 'optimizer'):
+                trainer.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            elif "optimizer" in checkpoint and hasattr(trainer, 'optimizer'):
+                trainer.optimizer.load_state_dict(checkpoint["optimizer"])
+            print(f"  ✓ 模型参数已恢复")
+            if "episode" in checkpoint:
+                print(f"  ✓ 原训练进度: Episode {checkpoint['episode']}")
+        else:
+            print(f"  ⚠️ Checkpoint 文件不存在: {resume_path}")
+            resume_path = None
+
     # 训练参数
     num_episodes = int(os.getenv("TEDG_NUM_EPISODES", "10000"))
     max_steps = int(os.getenv("TEDG_MAX_STEPS", "1000"))
