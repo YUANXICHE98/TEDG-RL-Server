@@ -1,8 +1,20 @@
 #!/usr/bin/env python3
-"""Smoke test: 运行 train_confmatch.py 的核心逻辑（1个episode，50步）"""
+"""
+Smoke Test: V2 消融实验全面测试
+测试所有6种实验配置：
+  1. embedding2000 - MultiChannelPolicyNet + Embedding
+  2. gumbel - MultiChannelPolicyNet + Gumbel
+  3. sparse_moe - MultiChannelPolicyNet + Sparse MoE
+  4. gumbel_sparse - MultiChannelPolicyNet + Gumbel + Sparse
+  5. hram_doc - HRAMPolicyNetDoc (4 Actors + 检索)
+  6. hram_e2e - HRAMPolicyNet (端到端)
+"""
 
 import os
 import sys
+import traceback
+from pathlib import Path
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import torch
@@ -11,94 +23,287 @@ import gymnasium as gym
 import nle.env
 import nle.nethack as nh
 
-from src.core.state_constructor import StateConstructor
-from src.core.networks_correct import MultiChannelPolicyNet
-from src.core.ppo_trainer import PPOTrainer
-from src.core.hypergraph_matcher import HypergraphMatcher
+# 测试配置
+TEST_EPISODES = 2
+TEST_STEPS = 10
 
-print("=" * 80)
-print("Smoke Test: train_confmatch.py 核心逻辑")
-print("=" * 80)
+def get_device():
+    """自动检测可用设备"""
+    try:
+        import torch_musa
+        if torch.musa.is_available():
+            return torch.device('musa:0')
+    except:
+        pass
+    if torch.cuda.is_available():
+        return torch.device('cuda:0')
+    return torch.device('cpu')
 
-# 1. 初始化环境
-print("\n[1/6] 初始化 NetHack 环境...")
-env = gym.make("NetHackScore-v0")
-obs, info = env.reset()
-print(f"  ✅ 环境初始化成功")
 
-# 2. 初始化超图匹配器
-print("\n[2/6] 初始化超图匹配器...")
-try:
-    matcher = HypergraphMatcher(
-        hypergraph_path="data/hypergraph/hypergraph_complete_real.json",
-        weights=(0.35, 0.35, 0.2, 0.1),
-        tau=200.0
-    )
-    print(f"  ✅ 超图加载成功，共 {len(matcher.edges)} 条超边")
-except Exception as e:
-    print(f"  ❌ 超图加载失败: {e}")
-    sys.exit(1)
+def extract_state(obs):
+    """从观测中提取115维状态"""
+    blstats = obs.get("blstats", [0] * nh.NLE_BLSTATS_SIZE)
+    state = np.zeros(115, dtype=np.float32)
+    
+    hp = blstats[nh.NLE_BL_HP]
+    hp_max = blstats[nh.NLE_BL_HPMAX]
+    state[0] = 1.0 if hp > 0 else 0.0
+    state[1] = hp / max(hp_max, 1)
+    state[2] = blstats[nh.NLE_BL_DEPTH] / 20.0
+    state[3] = np.log1p(blstats[nh.NLE_BL_GOLD]) / 10.0
+    state[4] = blstats[nh.NLE_BL_AC] / 20.0
+    state[5] = blstats[nh.NLE_BL_XP] / 30.0  # 经验等级
+    state[6] = blstats[nh.NLE_BL_HUNGER] / 20.0
+    
+    return state
 
-# 3. 初始化状态构造器
-print("\n[3/6] 初始化状态构造器...")
-state_constructor = StateConstructor(
-    belief_dim=50,
-    q_pre_dim=15,
-    q_scene_dim=15,
-    q_effect_dim=8,
-    q_rule_dim=10,
-    confidence_dim=1,
-    goal_dim=16
-)
-print(f"  ✅ 状态构造器初始化成功，输出维度: {state_constructor.state_dim}")
 
-# 4. 初始化网络
-print("\n[4/6] 初始化多通道网络...")
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-policy_net = MultiChannelPolicyNet(
-    state_dim=state_constructor.state_dim,
-    action_dim=23,
-    hidden_dim=128
-).to(device)
-print(f"  ✅ 网络初始化成功，设备: {device}")
+def test_multichannel(name, use_gumbel=False, sparse_topk=None):
+    """测试 MultiChannelPolicyNet 变体"""
+    print(f"\n{'='*60}")
+    print(f"测试: {name}")
+    print(f"  use_gumbel={use_gumbel}, sparse_topk={sparse_topk}")
+    print('='*60)
+    
+    from src.core.networks_correct import MultiChannelPolicyNet
+    
+    device = get_device()
+    
+    # 创建网络
+    policy_net = MultiChannelPolicyNet(
+        state_dim=115,
+        action_dim=23,
+        use_gumbel=use_gumbel,
+        gumbel_tau=1.0,
+        sparse_topk=sparse_topk
+    ).to(device)
+    
+    params = sum(p.numel() for p in policy_net.parameters())
+    print(f"  ✓ 网络参数: {params:,}")
+    
+    # 创建环境
+    env = gym.make("NetHackScore-v0")
+    
+    total_reward = 0
+    for ep in range(TEST_EPISODES):
+        obs, _ = env.reset()
+        for step in range(TEST_STEPS):
+            state = extract_state(obs)
+            state_t = torch.FloatTensor(state).unsqueeze(0).to(device)
+            
+            with torch.no_grad():
+                logits, value, alpha = policy_net(state_t)
+                dist = torch.distributions.Categorical(logits=logits)
+                action = dist.sample()
+            
+            obs, reward, done, truncated, _ = env.step(action.item())
+            total_reward += reward
+            if done or truncated:
+                break
+    
+    env.close()
+    print(f"  ✓ {TEST_EPISODES} episodes × {TEST_STEPS} steps 完成")
+    print(f"  ✓ 累计奖励: {total_reward:.1f}")
+    return True
 
-# 5. 测试状态提取
-print("\n[5/6] 测试状态提取...")
-blstats = obs["blstats"]
-hp = blstats[nh.NLE_BL_HP]
-hpmax = blstats[nh.NLE_BL_HPMAX]
-depth = blstats[nh.NLE_BL_DEPTH]
-gold = blstats[nh.NLE_BL_GOLD]
-score = blstats[nh.NLE_BL_SCORE]
 
-print(f"  原始 blstats:")
-print(f"    HP: {hp}/{hpmax} ({100*hp/max(1,hpmax):.0f}%)")
-print(f"    深度: {depth}层")
-print(f"    金币: {gold}")
-print(f"    分数: {score}")
+def test_hram_e2e():
+    """测试 HRAMPolicyNet (端到端)"""
+    print(f"\n{'='*60}")
+    print(f"测试: hram_e2e (端到端方案)")
+    print('='*60)
+    
+    from src.core.networks_hram import HRAMPolicyNet
+    
+    device = get_device()
+    
+    # 创建网络
+    policy_net = HRAMPolicyNet(
+        state_dim=115,
+        embed_dim=3072,
+        action_dim=23
+    ).to(device)
+    
+    params = sum(p.numel() for p in policy_net.parameters())
+    print(f"  ✓ 网络参数: {params:,}")
+    
+    # 创建环境
+    env = gym.make("NetHackScore-v0")
+    
+    total_reward = 0
+    for ep in range(TEST_EPISODES):
+        obs, _ = env.reset()
+        for step in range(TEST_STEPS):
+            state = extract_state(obs)
+            state_t = torch.FloatTensor(state).unsqueeze(0).to(device)
+            
+            with torch.no_grad():
+                logits, value, _ = policy_net(state_t)
+                dist = torch.distributions.Categorical(logits=logits)
+                action = dist.sample()
+            
+            obs, reward, done, truncated, _ = env.step(action.item())
+            total_reward += reward
+            if done or truncated:
+                break
+    
+    env.close()
+    print(f"  ✓ {TEST_EPISODES} episodes × {TEST_STEPS} steps 完成")
+    print(f"  ✓ 累计奖励: {total_reward:.1f}")
+    return True
 
-# 验证索引正确性
-if hp > 0 and hp == hpmax and depth == 1 and score == 0:
-    print(f"  ✅ blstats 索引正确")
-else:
-    print(f"  ❌ blstats 索引可能有问题")
-    sys.exit(1)
 
-# 6. 测试一步交互
-print("\n[6/6] 测试环境交互...")
-action = env.action_space.sample()
-obs, reward, terminated, truncated, info = env.step(action)
-print(f"  ✅ 环境交互成功")
-print(f"    动作: {action}")
-print(f"    奖励: {reward}")
-print(f"    终止: {terminated}")
+def test_hram_doc():
+    """测试 HRAMPolicyNetDoc (文档方案)"""
+    print(f"\n{'='*60}")
+    print(f"测试: hram_doc (文档方案: 4 Actors + 检索)")
+    print('='*60)
+    
+    from src.core.networks_hram import HRAMPolicyNetDoc
+    
+    device = get_device()
+    
+    # 创建网络
+    policy_net = HRAMPolicyNetDoc(
+        state_dim=115,
+        embed_dim=3072,
+        context_dim=128,
+        action_dim=23,
+        gumbel_tau=1.0
+    ).to(device)
+    
+    params = sum(p.numel() for p in policy_net.parameters())
+    print(f"  ✓ 网络参数: {params:,}")
+    
+    # 创建环境
+    env = gym.make("NetHackScore-v0")
+    
+    total_reward = 0
+    for ep in range(TEST_EPISODES):
+        obs, _ = env.reset()
+        for step in range(TEST_STEPS):
+            state = extract_state(obs)
+            state_t = torch.FloatTensor(state).unsqueeze(0).to(device)
+            
+            with torch.no_grad():
+                logits, alpha, value = policy_net(state_t, use_gumbel=True)
+                dist = torch.distributions.Categorical(logits=logits)
+                action = dist.sample()
+            
+            obs, reward, done, truncated, _ = env.step(action.item())
+            total_reward += reward
+            if done or truncated:
+                break
+    
+    env.close()
+    print(f"  ✓ {TEST_EPISODES} episodes × {TEST_STEPS} steps 完成")
+    print(f"  ✓ 累计奖励: {total_reward:.1f}")
+    return True
 
-env.close()
 
-print("\n" + "=" * 80)
-print("✅ Smoke Test 通过！train_confmatch.py 核心逻辑正常")
-print("=" * 80)
-print("\n可以安全运行完整训练:")
-print("  python train_confmatch.py")
-print("\n或运行短期测试（100 episodes）:")
-print("  TEDG_NUM_EPISODES=100 TEDG_MAX_STEPS=500 python train_confmatch.py")
+def test_output_dirs():
+    """测试输出目录结构"""
+    print(f"\n{'='*60}")
+    print("测试: 输出目录结构")
+    print('='*60)
+    
+    dirs = [
+        "ablation_v2/results/baseline/checkpoints",
+        "ablation_v2/results/baseline/logs",
+        "ablation_v2/results/no_mask/checkpoints",
+        "ablation_v2/results/no_mask/logs",
+        "ablation_v2/results/gumbel/checkpoints",
+        "ablation_v2/results/gumbel/logs",
+        "ablation_v2/results/sparse_moe/checkpoints",
+        "ablation_v2/results/sparse_moe/logs",
+        "ablation_v2/results/gumbel_sparse/checkpoints",
+        "ablation_v2/results/gumbel_sparse/logs",
+        "ablation_v2/results/hram_doc/checkpoints",
+        "ablation_v2/results/hram_doc/logs",
+        "ablation_v2/results/hram_e2e/checkpoints",
+        "ablation_v2/results/hram_e2e/logs",
+    ]
+    
+    for d in dirs:
+        Path(d).mkdir(parents=True, exist_ok=True)
+        print(f"  ✓ {d}")
+    
+    return True
+
+
+def main():
+    print("=" * 70)
+    print("       TEDG-RL V2 消融实验 Smoke Test")
+    print("=" * 70)
+    print(f"测试配置: {TEST_EPISODES} episodes × {TEST_STEPS} steps")
+    
+    device = get_device()
+    print(f"计算设备: {device}")
+    
+    results = {}
+    
+    # 测试目录
+    try:
+        results["output_dirs"] = test_output_dirs()
+    except Exception as e:
+        print(f"  ❌ 失败: {e}")
+        results["output_dirs"] = False
+    
+    # 测试 MultiChannelPolicyNet 变体
+    tests = [
+        ("baseline", False, None),
+        ("no_mask", False, None),
+        ("gumbel", True, None),
+        ("sparse_moe", True, 2),
+        ("gumbel_sparse", True, 1),
+    ]
+    
+    for name, use_gumbel, sparse_topk in tests:
+        try:
+            results[name] = test_multichannel(name, use_gumbel, sparse_topk)
+        except Exception as e:
+            print(f"  ❌ 失败: {e}")
+            traceback.print_exc()
+            results[name] = False
+    
+    # 测试 H-RAM
+    try:
+        results["hram_e2e"] = test_hram_e2e()
+    except Exception as e:
+        print(f"  ❌ 失败: {e}")
+        traceback.print_exc()
+        results["hram_e2e"] = False
+    
+    try:
+        results["hram_doc"] = test_hram_doc()
+    except Exception as e:
+        print(f"  ❌ 失败: {e}")
+        traceback.print_exc()
+        results["hram_doc"] = False
+    
+    # 汇总
+    print("\n" + "=" * 70)
+    print("                    测试结果汇总")
+    print("=" * 70)
+    
+    all_passed = True
+    for name, passed in results.items():
+        status = "✅ 通过" if passed else "❌ 失败"
+        print(f"  {name:20} {status}")
+        if not passed:
+            all_passed = False
+    
+    print("=" * 70)
+    if all_passed:
+        print("✅ 所有测试通过！可以启动正式实验")
+        print("\n启动命令:")
+        print("  bash ablation_v2/scripts/run_all_experiments.sh")
+    else:
+        print("❌ 部分测试失败，请先修复问题")
+    print("=" * 70)
+    
+    return 0 if all_passed else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

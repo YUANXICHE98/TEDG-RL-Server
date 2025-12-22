@@ -1,0 +1,140 @@
+{
+  "exp": "no_mask",
+  "model": "multichannel",
+  "attn_kind": "channel_alpha",
+  "checkpoint": "ablation_v2/results/no_mask/checkpoints/best_model.pth",
+  "episodes": 5,
+  "max_steps": 600,
+  "scenario_mode": "atoms",
+  "masking": "off",
+  "matcher": "embedding",
+  "scenarios": [
+    {
+      "scenario": "dlvl_1-3|pre:player_alive|scene:dlvl_1",
+      "steps": 1487,
+      "attn_mean": [
+        0.2581767141819,
+        0.24758130311965942,
+        0.24731694161891937,
+        0.2469249963760376
+      ],
+      "top_actions_by_freq": [
+        [
+          "WAIT",
+          0.3887020847343645
+        ],
+        [
+          "SEARCH",
+          0.37794216543375925
+        ],
+        [
+          "RUN_W",
+          0.07666442501681238
+        ],
+        [
+          "RUN_E",
+          0.03765971755211836
+        ],
+        [
+          "W",
+          0.022864828513786146
+        ]
+      ]
+    },
+    {
+      "scenario": "dlvl_1-3|pre:has_gold,player_alive|scene:dlvl_1",
+      "steps": 585,
+      "attn_mean": [
+        0.2581767141819,
+        0.24758130311965942,
+        0.24731694161891937,
+        0.2469249963760376
+      ],
+      "top_actions_by_freq": [
+        [
+          "SEARCH",
+          0.3367521367521368
+        ],
+        [
+          "WAIT",
+          0.2923076923076923
+        ],
+        [
+          "RUN_W",
+          0.11794871794871795
+        ],
+        [
+          "RUN_E",
+          0.06837606837606838
+        ],
+        [
+          "N",
+          0.02735042735042735
+        ]
+      ]
+    },
+    {
+      "scenario": "dlvl_1-3|pre:low_hp,player_alive|scene:dlvl_1",
+      "steps": 336,
+      "attn_mean": [
+        0.2581767141819,
+        0.24758130311965942,
+        0.24731694161891937,
+        0.2469249963760376
+      ],
+      "top_actions_by_freq": [
+        [
+          "W",
+          0.18154761904761904
+        ],
+        [
+          "N",
+          0.11011904761904762
+        ],
+        [
+          "E",
+          0.09821428571428571
+        ],
+        [
+          "RUN_SE",
+          0.06845238095238096
+        ],
+        [
+          "RUN_E",
+          0.05357142857142857
+        ]
+      ]
+    }
+  ],
+  "attn_labels": [
+    "α_pre",
+    "α_scene",
+    "α_effect",
+    "α_rule"
+  ],
+  "action_labels": [
+    "MORE",
+    "N",
+    "E",
+    "S",
+    "W",
+    "NE",
+    "SE",
+    "SW",
+    "NW",
+    "RUN_N",
+    "RUN_E",
+    "RUN_S",
+    "RUN_W",
+    "RUN_NE",
+    "RUN_SE",
+    "RUN_SW",
+    "RUN_NW",
+    "UP",
+    "DOWN",
+    "WAIT",
+    "KICK",
+    "EAT",
+    "SEARCH"
+  ]
+}

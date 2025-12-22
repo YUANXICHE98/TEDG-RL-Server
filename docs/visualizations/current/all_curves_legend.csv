@@ -1,0 +1,16 @@
+label,kind,points,source
+V1/embedding,per-episode,5000,ablation_v1/results/results_embedding/logs/training_log.json
+V1/extended_steps,per-episode,1000,ablation_v1/results/results_extended_steps/logs/training_log.json
+V1/fixed_th,per-episode,5000,ablation_v1/results/results_fixed_th/logs/training_log.json
+V1/full,per-episode,5000,ablation_v1/results/results_full/logs/training_log.json
+V1/no_mask,per-episode,5000,ablation_v1/results/results_no_mask/logs/training_log.json
+V1/single_ch,per-episode,5000,ablation_v1/results/results_single_ch/logs/training_log.json
+V2/baseline,per-episode,4021,ablation_v2/results/baseline/training.log
+V2/gumbel,per-episode,3657,ablation_v2/results/gumbel/training.log
+V2/gumbel_fixed,per-episode,448,ablation_v2/results/gumbel_fixed/training.log
+V2/gumbel_sparse,per-episode,3433,ablation_v2/results/gumbel_sparse/training.log
+V2/hram_doc,eval-block,20,ablation_v2/results/hram_doc/training.log
+V2/hram_doc_fixed,eval-block,21,ablation_v2/results/hram_doc_fixed/training.log
+V2/hram_e2e,eval-block,31,ablation_v2/results/hram_e2e/training.log
+V2/no_mask,per-episode,5220,ablation_v2/results/no_mask/training.log
+V2/sparse_moe,per-episode,4249,ablation_v2/results/sparse_moe/training.log

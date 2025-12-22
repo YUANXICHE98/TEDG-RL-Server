@@ -1,0 +1,204 @@
+{
+  "exp": "baseline",
+  "model": "multichannel",
+  "attn_kind": "channel_alpha",
+  "checkpoint": "ablation_v2/results/baseline/checkpoints/best_model.pth",
+  "episodes": 5,
+  "max_steps": 600,
+  "scenario_mode": "atoms",
+  "masking": "on",
+  "matcher": "embedding",
+  "scenarios": [
+    {
+      "scenario": "dlvl_1-3|pre:player_alive|scene:dlvl_1",
+      "steps": 1434,
+      "attn_mean": [
+        0.2482883334159851,
+        0.24958910048007965,
+        0.251049667596817,
+        0.2510729432106018
+      ],
+      "top_actions_by_freq": [
+        [
+          "SEARCH",
+          0.22245467224546722
+        ],
+        [
+          "WAIT",
+          0.17224546722454673
+        ],
+        [
+          "RUN_E",
+          0.11436541143654114
+        ],
+        [
+          "RUN_W",
+          0.08647140864714087
+        ],
+        [
+          "W",
+          0.07252440725244072
+        ]
+      ]
+    },
+    {
+      "scenario": "dlvl_1-3|pre:has_gold,player_alive|scene:dlvl_1",
+      "steps": 1174,
+      "attn_mean": [
+        0.2482883334159851,
+        0.24958910048007965,
+        0.251049667596817,
+        0.2510729432106018
+      ],
+      "top_actions_by_freq": [
+        [
+          "SEARCH",
+          0.16695059625212946
+        ],
+        [
+          "WAIT",
+          0.15417376490630325
+        ],
+        [
+          "RUN_E",
+          0.11073253833049404
+        ],
+        [
+          "W",
+          0.0868824531516184
+        ],
+        [
+          "RUN_W",
+          0.07240204429301533
+        ]
+      ]
+    },
+    {
+      "scenario": "dlvl_1-3|pre:has_gold,player_alive|scene:dlvl_2",
+      "steps": 245,
+      "attn_mean": [
+        0.2482883334159851,
+        0.24958910048007965,
+        0.251049667596817,
+        0.2510729432106018
+      ],
+      "top_actions_by_freq": [
+        [
+          "WAIT",
+          0.14285714285714285
+        ],
+        [
+          "RUN_E",
+          0.1306122448979592
+        ],
+        [
+          "SEARCH",
+          0.11836734693877551
+        ],
+        [
+          "W",
+          0.10612244897959183
+        ],
+        [
+          "RUN_W",
+          0.10612244897959183
+        ]
+      ]
+    },
+    {
+      "scenario": "dlvl_1-3|pre:low_hp,player_alive|scene:dlvl_1",
+      "steps": 142,
+      "attn_mean": [
+        0.2482883334159851,
+        0.24958910048007965,
+        0.251049667596817,
+        0.2510729432106018
+      ],
+      "top_actions_by_freq": [
+        [
+          "W",
+          0.11267605633802817
+        ],
+        [
+          "RUN_E",
+          0.11267605633802817
+        ],
+        [
+          "SW",
+          0.07746478873239436
+        ],
+        [
+          "RUN_NW",
+          0.06338028169014084
+        ],
+        [
+          "E",
+          0.056338028169014086
+        ]
+      ]
+    },
+    {
+      "scenario": "dlvl_1-3|pre:player_alive|scene:dlvl_2",
+      "steps": 5,
+      "attn_mean": [
+        0.2482883334159851,
+        0.24958910048007965,
+        0.251049667596817,
+        0.2510729432106018
+      ],
+      "top_actions_by_freq": [
+        [
+          "RUN_N",
+          0.2
+        ],
+        [
+          "RUN_E",
+          0.2
+        ],
+        [
+          "RUN_SE",
+          0.2
+        ],
+        [
+          "WAIT",
+          0.2
+        ],
+        [
+          "SEARCH",
+          0.2
+        ]
+      ]
+    }
+  ],
+  "attn_labels": [
+    "α_pre",
+    "α_scene",
+    "α_effect",
+    "α_rule"
+  ],
+  "action_labels": [
+    "MORE",
+    "N",
+    "E",
+    "S",
+    "W",
+    "NE",
+    "SE",
+    "SW",
+    "NW",
+    "RUN_N",
+    "RUN_E",
+    "RUN_S",
+    "RUN_W",
+    "RUN_NE",
+    "RUN_SE",
+    "RUN_SW",
+    "RUN_NW",
+    "UP",
+    "DOWN",
+    "WAIT",
+    "KICK",
+    "EAT",
+    "SEARCH"
+  ]
+}

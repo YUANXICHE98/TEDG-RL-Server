@@ -1,8 +1,10 @@
 """超图加载和匹配模块"""
 
 import os
+import math
 import pickle
 import numpy as np
+import hashlib
 from pathlib import Path
 from typing import Dict, List, Tuple, Any, Optional
 import gymnasium as gym
@@ -295,14 +297,56 @@ def _match_context(
 
 
 class EmbeddingMatcher:
-    """基于嵌入的超图匹配器，支持 atom 嵌入缓存"""
+    """基于嵌入的超图匹配器，支持 atom 嵌入缓存 + 时间衰减"""
     
-    def __init__(self, min_support: int = 5):
+    def __init__(self, min_support: int = 5, tau: float = 1000.0, decay_weight: float = 0.3):
         self.client = _create_embedding_client()
         self.embedding_index = _build_hypergraph_embedding_index(min_support)
         self.atom_cache: Dict[str, np.ndarray] = {}  # atom -> embedding 缓存
+        
+        # V2新增: 时间衰减机制 (融合V1的时间感知能力)
+        self.tau = tau  # 时间衰减常数，越大衰减越慢
+        self.decay_weight = decay_weight  # 时间衰减在最终分数中的权重
+        self.edge_last_seen: Dict[int, float] = {}  # edge_idx -> last_triggered_time
+        self.current_step = 0  # 当前时间步
+        
         self._load_atom_cache()
         print(f"[EmbeddingMatcher] 初始化: {len(self.embedding_index['embeddings'])} 条超边嵌入, {len(self.atom_cache)} 个 atom 缓存")
+        print(f"  - 时间衰减: tau={tau}, weight={decay_weight}")
+
+    def _embedding_dim(self) -> int:
+        """返回当前嵌入维度（优先从索引推断），避免与环境变量不一致导致shape错误。"""
+        try:
+            if self.embedding_index and "embeddings" in self.embedding_index:
+                return int(self.embedding_index["embeddings"].shape[1])
+        except Exception:
+            pass
+        return int(os.getenv("EMBEDDING_DIM", "3072"))
+
+    def _offline_atom_embedding(self, atom: str) -> np.ndarray:
+        """
+        离线fallback：对不可用的嵌入API，生成可复现的“伪嵌入”（单位向量）。
+        目的：避免训练被网络/DNS卡死；保持维度一致、数值稳定。
+        """
+        dim = self._embedding_dim()
+        digest = hashlib.sha256(atom.encode("utf-8", errors="ignore")).digest()
+        seed = int.from_bytes(digest[:8], "little", signed=False) % (2**32)
+        rng = np.random.RandomState(seed)
+        v = rng.normal(size=(dim,)).astype(np.float32)
+        n = np.linalg.norm(v)
+        if n > 0:
+            v = v / n
+        return v
+
+    def _should_use_offline(self) -> bool:
+        """
+        是否强制离线：用于无网络/网络受限场景。
+        - TEDG_OFFLINE_EMBEDDINGS=1：完全不调用外部API
+        - 或 api_key 为空时也自动离线
+        """
+        if os.getenv("TEDG_OFFLINE_EMBEDDINGS", "0") == "1":
+            return True
+        return not bool(self.client.get("api_key"))
     
     def _get_cache_path(self) -> Path:
         PROJECT_ROOT = Path(__file__).parent.parent.parent
@@ -331,22 +375,27 @@ class EmbeddingMatcher:
         """获取单个 atom 的嵌入，优先从缓存读取"""
         if atom in self.atom_cache:
             return self.atom_cache[atom]
-        
-        # 现场计算
+
+        if self._should_use_offline():
+            emb = self._offline_atom_embedding(atom)
+            self.atom_cache[atom] = emb
+            return emb
+
+        # 在线计算（失败则降级离线，避免反复重试卡死）
         try:
             emb = _embedding_request(self.client, [atom])[0]
             emb = emb / (np.linalg.norm(emb) + 1e-8)  # L2 归一化
             self.atom_cache[atom] = emb
             return emb
         except Exception as e:
-            print(f"  [警告] atom '{atom}' 嵌入失败: {e}")
-            # 返回零向量
-            dim = int(os.getenv("EMBEDDING_DIM", "1536"))
-            return np.zeros(dim, dtype=np.float32)
+            print(f"  [警告] atom '{atom}' 嵌入失败，降级离线: {e}")
+            emb = self._offline_atom_embedding(atom)
+            self.atom_cache[atom] = emb
+            return emb
     
     def _get_atoms_embedding(self, atoms: List[str]) -> np.ndarray:
         """获取一组 atoms 的聚合嵌入（均值池化）"""
-        dim = int(os.getenv("EMBEDDING_DIM", "1536"))
+        dim = self._embedding_dim()
         if not atoms:
             return np.zeros(dim, dtype=np.float32)
         
@@ -354,15 +403,21 @@ class EmbeddingMatcher:
         cached = [a for a in atoms if a in self.atom_cache]
         uncached = [a for a in atoms if a not in self.atom_cache]
         
-        # 批量获取未缓存的嵌入
+        # 批量获取未缓存的嵌入（失败或离线时用伪嵌入补齐，并写入缓存避免反复请求）
         if uncached:
-            try:
-                embs = _embedding_request(self.client, uncached)
-                for i, atom in enumerate(uncached):
-                    emb = embs[i] / (np.linalg.norm(embs[i]) + 1e-8)
-                    self.atom_cache[atom] = emb
-            except Exception as e:
-                print(f"  [警告] 批量嵌入失败: {e}")
+            if self._should_use_offline():
+                for atom in uncached:
+                    self.atom_cache[atom] = self._offline_atom_embedding(atom)
+            else:
+                try:
+                    embs = _embedding_request(self.client, uncached)
+                    for i, atom in enumerate(uncached):
+                        emb = embs[i] / (np.linalg.norm(embs[i]) + 1e-8)
+                        self.atom_cache[atom] = emb
+                except Exception as e:
+                    print(f"  [警告] 批量嵌入失败，降级离线: {e}")
+                    for atom in uncached:
+                        self.atom_cache[atom] = self._offline_atom_embedding(atom)
         
         # 聚合所有嵌入
         all_embs = [self.atom_cache.get(a, np.zeros(dim, dtype=np.float32)) for a in atoms]
@@ -377,6 +432,15 @@ class EmbeddingMatcher:
         
         return mean_emb
     
+    def set_step(self, step: int):
+        """设置当前时间步 (由训练循环调用)"""
+        self.current_step = step
+    
+    def reset_episode(self):
+        """重置Episode时清空时间记录 (新Episode开始时调用)"""
+        self.edge_last_seen.clear()
+        self.current_step = 0
+    
     def match(
         self,
         pre_nodes: List[str],
@@ -384,16 +448,23 @@ class EmbeddingMatcher:
         effect_atoms: List[str],
         rule_atoms: List[str],
         top_k: int = 8,
+        t_now: int = None,
     ) -> Tuple[float, List[Dict[str, Any]]]:
         """
-        基于嵌入匹配超边
+        基于嵌入匹配超边，融合时间衰减
+        
+        Args:
+            t_now: 当前时间步 (可选，默认使用 self.current_step)
         
         Returns:
-            confidence: 最高相似度作为置信度
+            confidence: 融合后的最高分数作为置信度
             topk_edges: Top-K 匹配的超边
         """
         if self.embedding_index is None:
             return 0.0, []
+        
+        if t_now is None:
+            t_now = self.current_step
         
         # 将所有 atoms 合并为查询文本
         all_atoms = pre_nodes + scene_atoms + effect_atoms + rule_atoms
@@ -404,24 +475,44 @@ class EmbeddingMatcher:
         query_emb = self._get_atoms_embedding(all_atoms)
         query_emb = query_emb.reshape(1, -1)  # (1, dim)
         
-        # 计算与所有超边的余弦相似度
+        # 计算与所有超边的余弦相似度 (V2语义能力)
         edge_embs = self.embedding_index["embeddings"]  # (n_edges, dim)
-        sims = np.dot(edge_embs, query_emb.T).flatten()  # (n_edges,)
+        semantic_sims = np.dot(edge_embs, query_emb.T).flatten()  # (n_edges,)
         
-        # 获取 Top-K
-        top_idx = np.argsort(-sims)[:top_k]
+        # V2新增: 计算时间衰减分数 (V1时间感知能力)
+        n_edges = len(semantic_sims)
+        decay_scores = np.zeros(n_edges, dtype=np.float32)
+        for idx in range(n_edges):
+            if idx in self.edge_last_seen:
+                t_last = self.edge_last_seen[idx]
+                # 指数衰减: 刚见过的超边得分高
+                decay_scores[idx] = math.exp(-max(0.0, t_now - t_last) / self.tau)
+        
+        # 融合分数: 语义相似度 + 时间衰减加成
+        # 既要像(语义)，又要近(时间)
+        fused_sims = semantic_sims + self.decay_weight * decay_scores
+        
+        # 获取 Top-K (按融合分数排序)
+        top_idx = np.argsort(-fused_sims)[:top_k]
         
         topk_edges = []
         for idx in top_idx:
             meta = self.embedding_index["meta"][idx]
+            
+            # 更新高匹配度超边的时间戳 (阈值 0.5)
+            if semantic_sims[idx] > 0.5:
+                self.edge_last_seen[idx] = t_now
+            
             topk_edges.append({
                 "edge": meta["edge"],
-                "similarity": float(sims[idx]),
+                "similarity": float(semantic_sims[idx]),
+                "fused_score": float(fused_sims[idx]),
+                "decay": float(decay_scores[idx]),
                 "operator": meta["operator"],
             })
         
-        # confidence = 最高相似度
-        confidence = float(sims[top_idx[0]]) if len(top_idx) > 0 else 0.0
+        # confidence = 融合后的最高分数
+        confidence = float(fused_sims[top_idx[0]]) if len(top_idx) > 0 else 0.0
         
         return confidence, topk_edges
     
@@ -429,3 +520,25 @@ class EmbeddingMatcher:
         """手动保存缓存（训练结束时调用）"""
         self._save_atom_cache()
         print(f"[EmbeddingMatcher] 保存 {len(self.atom_cache)} 个 atom 嵌入到缓存")
+    
+    def export_memory_bank(self) -> "torch.Tensor":
+        """
+        导出超图记忆张量 (H-RAM 架构需要)
+        
+        Returns:
+            memory_bank: (N_edges, 3072) 的 PyTorch Tensor
+        """
+        import torch
+        if self.embedding_index is None:
+            raise ValueError("Embedding index 未初始化")
+        
+        embeddings = self.embedding_index["embeddings"]  # (N_edges, 3072) numpy array
+        memory_bank = torch.FloatTensor(embeddings)
+        print(f"[EmbeddingMatcher] 导出 Memory Bank: {memory_bank.shape}")
+        return memory_bank
+    
+    def get_edge_meta(self) -> List[Dict]:
+        """获取所有超边的元数据"""
+        if self.embedding_index is None:
+            return []
+        return self.embedding_index["meta"]

@@ -113,25 +113,38 @@ class ActorRule(nn.Module):
 class AttentionWeightNet(nn.Module):
     """注意力权重网络 - 计算α权重用于融合4个Actor的logits"""
     
-    def __init__(self, state_dim: int = 115, hidden_dim: int = 64):
+    def __init__(self, state_dim: int = 115, hidden_dim: int = 64, use_gumbel: bool = False, gumbel_tau: float = 1.0):
         super().__init__()
         # 输入: 完整state(115)
         self.fc1 = nn.Linear(state_dim, hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, hidden_dim)
         self.fc3 = nn.Linear(hidden_dim, 4)  # 输出4个通路的权重
         self.relu = nn.ReLU()
+        self.use_gumbel = use_gumbel
+        self.gumbel_tau = gumbel_tau
     
-    def forward(self, state: torch.Tensor) -> torch.Tensor:
+    def forward(self, state: torch.Tensor, hard: bool = None) -> torch.Tensor:
         """
         Args:
             state: (batch, 115) 完整状态向量
+            hard: 是否使用硬路由（仅在use_gumbel=True时有效）
         Returns:
-            alpha: (batch, 4) softmax后的权重 [α_pre, α_scene, α_effect, α_rule]
+            alpha: (batch, 4) 权重 [α_pre, α_scene, α_effect, α_rule]
         """
         x = self.relu(self.fc1(state))
         x = self.relu(self.fc2(x))
         logits = self.fc3(x)
-        alpha = F.softmax(logits, dim=-1)
+        logits = torch.nan_to_num(logits, nan=0.0, posinf=20.0, neginf=-20.0).clamp(-20.0, 20.0)
+        
+        if self.use_gumbel:
+            # V2: 使用 Gumbel-Softmax 实现硬路由
+            if hard is None:
+                hard = self.training  # 训练时用硬路由，评估时用软路由
+            alpha = F.gumbel_softmax(logits, tau=self.gumbel_tau, hard=hard)
+        else:
+            # V1: 原始软融合
+            alpha = F.softmax(logits, dim=-1)
+        
         return alpha
 
 
@@ -160,12 +173,10 @@ class CriticNet(nn.Module):
 
 class MultiChannelPolicyNet(nn.Module):
     """
-    多通道策略网络 - 正确实现
+    多通道策略网络 - V2 版本支持 Gumbel-Softmax 和 Sparse MoE
     
-    关键点:
-    1. 4个Actor各自处理不同的输入子集
-    2. AttentionWeightNet计算α权重
-    3. 融合: fused_logits = Σ(α_i * logits_i)
+    V1: 原始版本 - 4个Actor + 软融合
+    V2: 新版本 - 支持硬路由和稀疏激活
     """
     
     def __init__(
@@ -174,6 +185,10 @@ class MultiChannelPolicyNet(nn.Module):
         action_dim: int = 33,
         actor_hidden_dim: int = 128,
         attention_hidden_dim: int = 64,
+        # V2 新参数
+        use_gumbel: bool = False,
+        gumbel_tau: float = 1.0,
+        sparse_topk: int = None,
     ):
         super().__init__()
         
@@ -183,8 +198,16 @@ class MultiChannelPolicyNet(nn.Module):
         self.actor_effect = ActorEffect(action_dim, actor_hidden_dim)
         self.actor_rule = ActorRule(action_dim, actor_hidden_dim)
         
-        # 注意力权重网络
-        self.attention_net = AttentionWeightNet(state_dim, attention_hidden_dim)
+        # V2: 注意力权重网络支持 Gumbel-Softmax
+        self.attention_net = AttentionWeightNet(
+            state_dim, 
+            attention_hidden_dim,
+            use_gumbel=use_gumbel,
+            gumbel_tau=gumbel_tau
+        )
+        
+        # V2: Sparse MoE 参数
+        self.sparse_topk = sparse_topk
         
         # Critic网络
         self.critic = CriticNet(state_dim, actor_hidden_dim)
@@ -261,13 +284,22 @@ class MultiChannelPolicyNet(nn.Module):
             fused_logits = logits_pre
             alpha = alpha * 0 + torch.tensor([1.0, 0.0, 0.0, 0.0], device=alpha.device)
         else:
-            # 加权融合logits
-            alpha_expanded = alpha.unsqueeze(2)  # (batch, 4, 1)
+            # V2: Sparse MoE 逻辑
             logits_stack = torch.stack([logits_pre, logits_scene, logits_effect, logits_rule], dim=1)
-            fused_logits = (alpha_expanded * logits_stack).sum(dim=1)  # (batch, action_dim)
+            
+            if self.sparse_topk is not None and self.sparse_topk < 4:
+                # 只激活 top-k 个专家
+                fused_logits = self._sparse_fusion(logits_stack, alpha)
+            else:
+                # V1: 原始加权融合
+                alpha_expanded = alpha.unsqueeze(2)  # (batch, 4, 1)
+                fused_logits = (alpha_expanded * logits_stack).sum(dim=1)  # (batch, action_dim)
         
         # 计算状态价值
         value = self.critic(state)  # (batch, 1)
+        
+        fused_logits = torch.nan_to_num(fused_logits, nan=0.0, posinf=20.0, neginf=-20.0).clamp(-20.0, 20.0)
+        value = torch.nan_to_num(value, nan=0.0, posinf=1e3, neginf=-1e3)
         
         if squeeze_output:
             fused_logits = fused_logits.squeeze(0)
@@ -275,6 +307,27 @@ class MultiChannelPolicyNet(nn.Module):
             value = value.squeeze(0)
         
         return fused_logits, alpha, value
+    
+    def _sparse_fusion(self, logits_stack: torch.Tensor, alpha: torch.Tensor) -> torch.Tensor:
+        """V2: Sparse MoE 融合 - 只激活 top-k 个专家"""
+        batch_size = alpha.size(0)
+        
+        # 获取 top-k 的索引和权重
+        topk_values, topk_indices = torch.topk(alpha, self.sparse_topk, dim=-1)
+        
+        # 创建 mask
+        mask = torch.zeros_like(alpha)
+        mask.scatter_(-1, topk_indices, 1.0)
+        
+        # 重新归一化权重
+        sparse_alpha = alpha * mask
+        sparse_alpha = sparse_alpha / (sparse_alpha.sum(dim=-1, keepdim=True) + 1e-8)
+        
+        # 应用稀疏融合
+        sparse_alpha = sparse_alpha.unsqueeze(2)  # (batch, 4, 1)
+        fused_logits = (sparse_alpha * logits_stack).sum(dim=1)  # (batch, action_dim)
+        
+        return fused_logits
     
     def get_action_distribution(self, state: torch.Tensor) -> Tuple[torch.distributions.Categorical, torch.Tensor]:
         """获取动作分布和价值"""

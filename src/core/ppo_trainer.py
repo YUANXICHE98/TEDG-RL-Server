@@ -17,7 +17,16 @@ class ReplayBuffer:
         self.capacity = capacity
         self.buffer = deque(maxlen=capacity)
     
-    def add(self, state: np.ndarray, action: int, reward: float, next_state: np.ndarray, done: bool, log_prob: float):
+    def add(
+        self,
+        state: np.ndarray,
+        action: int,
+        reward: float,
+        next_state: np.ndarray,
+        done: bool,
+        log_prob: float,
+        action_mask: Optional[np.ndarray] = None,
+    ):
         """添加经验"""
         self.buffer.append({
             'state': state,
@@ -26,6 +35,7 @@ class ReplayBuffer:
             'next_state': next_state,
             'done': done,
             'log_prob': log_prob,
+            'action_mask': action_mask,
         })
     
     def sample_batch(self, batch_size: int) -> Dict[str, torch.Tensor]:
@@ -44,6 +54,12 @@ class ReplayBuffer:
         dones = torch.FloatTensor([b['done'] for b in batch])
         old_log_probs = torch.FloatTensor([b['log_prob'] for b in batch])
         
+        # 动作掩码（可选）：只有当该batch里每条样本都有mask时才返回，避免混用
+        masks = [b.get("action_mask") for b in batch]
+        action_masks = None
+        if masks and all(m is not None for m in masks):
+            action_masks = torch.BoolTensor(np.array(masks, dtype=bool))
+        
         return {
             'states': states,
             'actions': actions,
@@ -51,6 +67,7 @@ class ReplayBuffer:
             'next_states': next_states,
             'dones': dones,
             'old_log_probs': old_log_probs,
+            'action_masks': action_masks,
         }
     
     def __len__(self):
@@ -148,6 +165,7 @@ class PPOTrainer:
         ppo_epochs: int = 3,
         batch_size: int = 64,
         device: str = 'cuda' if torch.cuda.is_available() else 'cpu',
+        alpha_entropy_coef: float = 0.1,  # α权重熵正则化系数，E2E模式建议设为0
     ):
         self.policy_net = policy_net.to(device)
         self.device = device
@@ -161,7 +179,7 @@ class PPOTrainer:
         
         # 熵正则化系数 (增加以鼓励探索)
         self.entropy_coef = 0.05  # 从0.01增加到0.05
-        self.alpha_entropy_coef = 0.1  # α权重熵正则化系数
+        self.alpha_entropy_coef = alpha_entropy_coef  # α权重熵正则化系数
         
         # 优化器
         self.optimizer = optim.Adam(self.policy_net.parameters(), lr=learning_rate)
@@ -260,6 +278,9 @@ class PPOTrainer:
         rewards = batch['rewards'].to(self.device)
         dones = batch['dones'].to(self.device)
         old_log_probs = batch['old_log_probs'].to(self.device)
+        action_masks = batch.get("action_masks")
+        if action_masks is not None:
+            action_masks = action_masks.to(self.device)
         
         # 计算旧价值和新价值
         with torch.no_grad():
@@ -283,13 +304,36 @@ class PPOTrainer:
             logits, alpha, values = self.policy_net(states)
             values = values.squeeze(-1)
             
+            # NaN/Inf检查：防止Categorical分布崩溃
+            if torch.isnan(logits).any() or torch.isinf(logits).any() or torch.isnan(values).any() or torch.isinf(values).any():
+                print(f"[WARNING] logits contains NaN/Inf, skipping this batch")
+                continue
+            
+            # 如果训练时使用了动作掩码（属于“策略的一部分”），更新阶段也必须一致地应用
+            if action_masks is not None:
+                masked_logits = logits.masked_fill(~action_masks, float("-inf"))
+                # 兜底：如果某行全被mask掉，则退回未mask logits
+                all_bad = ~torch.isfinite(masked_logits).any(dim=-1)
+                if all_bad.any():
+                    masked_logits[all_bad] = logits[all_bad]
+                logits_for_dist = masked_logits
+            else:
+                logits_for_dist = logits
+            
             # 计算新的对数概率
-            dist = torch.distributions.Categorical(logits=logits)
+            dist = torch.distributions.Categorical(logits=logits_for_dist)
             new_log_probs = dist.log_prob(actions)
             entropy = dist.entropy().mean()
             
             # 计算α权重的熵 (鼓励均衡分布)
-            alpha_entropy = -(alpha * torch.log(alpha + 1e-8)).sum(dim=-1).mean()
+            # V3.2适配: attn_weights可能是(batch,1,K)或(batch,4)
+            if alpha.dim() == 3:
+                # V3.2 E2E: (batch, 1, K) -> squeeze到(batch, K)
+                alpha_squeezed = alpha.squeeze(1)
+            else:
+                # 旧版4专家: (batch, 4)
+                alpha_squeezed = alpha
+            alpha_entropy = -(alpha_squeezed * torch.log(alpha_squeezed + 1e-8)).sum(dim=-1).mean()
             
             # PPO比率
             ratio = torch.exp(new_log_probs - old_log_probs)
@@ -304,6 +348,9 @@ class PPOTrainer:
             
             # 总损失
             total_loss = actor_loss + 0.5 * critic_loss
+            if not torch.isfinite(total_loss):
+                print("[WARNING] total_loss is NaN/Inf, skipping this batch")
+                continue
             
             # 反向传播
             self.optimizer.zero_grad()
@@ -318,6 +365,8 @@ class PPOTrainer:
         self.buffer.clear()
         
         # 统计信息
+        if not actor_losses or not critic_losses:
+            return {}
         stats = {
             'actor_loss': np.mean(actor_losses),
             'critic_loss': np.mean(critic_losses),

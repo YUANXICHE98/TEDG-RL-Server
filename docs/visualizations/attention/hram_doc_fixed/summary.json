@@ -1,0 +1,108 @@
+{
+  "exp": "hram_doc_fixed",
+  "model": "hram_doc",
+  "attn_kind": "channel_alpha",
+  "checkpoint": "ablation_v2/results/hram_doc_fixed/checkpoints/best_model.pth",
+  "episodes": 3,
+  "max_steps": 600,
+  "scenario_mode": "simple",
+  "masking": "off",
+  "matcher": "coverage",
+  "scenarios": [
+    {
+      "scenario": "dlvl_1-3|low_hp=0|gold=0",
+      "steps": 1049,
+      "attn_mean": [
+        0.24963143825871928,
+        0.2498887866820689,
+        0.25063052767793603,
+        0.24984924127307814
+      ],
+      "top_actions_by_freq": [
+        [
+          "WAIT",
+          0.1773117254528122
+        ],
+        [
+          "SEARCH",
+          0.16968541468064824
+        ],
+        [
+          "RUN_W",
+          0.09437559580552908
+        ],
+        [
+          "RUN_E",
+          0.09151572926596759
+        ],
+        [
+          "W",
+          0.07340324118207817
+        ]
+      ]
+    },
+    {
+      "scenario": "dlvl_1-3|low_hp=0|gold=1",
+      "steps": 751,
+      "attn_mean": [
+        0.24963969728362545,
+        0.24989244601777327,
+        0.25062152612383926,
+        0.24984633464232267
+      ],
+      "top_actions_by_freq": [
+        [
+          "WAIT",
+          0.1677762982689747
+        ],
+        [
+          "SEARCH",
+          0.1677762982689747
+        ],
+        [
+          "RUN_E",
+          0.10252996005326231
+        ],
+        [
+          "E",
+          0.08122503328894808
+        ],
+        [
+          "RUN_W",
+          0.07057256990679095
+        ]
+      ]
+    }
+  ],
+  "attn_labels": [
+    "α_pre",
+    "α_scene",
+    "α_effect",
+    "α_rule"
+  ],
+  "action_labels": [
+    "MORE",
+    "N",
+    "E",
+    "S",
+    "W",
+    "NE",
+    "SE",
+    "SW",
+    "NW",
+    "RUN_N",
+    "RUN_E",
+    "RUN_S",
+    "RUN_W",
+    "RUN_NE",
+    "RUN_SE",
+    "RUN_SW",
+    "RUN_NW",
+    "UP",
+    "DOWN",
+    "WAIT",
+    "KICK",
+    "EAT",
+    "SEARCH"
+  ]
+}

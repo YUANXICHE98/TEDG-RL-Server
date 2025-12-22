@@ -211,14 +211,22 @@ class ActionMasker:
             masked_logits: 应用掩蔽后的logits
         """
         mask = self.get_action_mask(pre_nodes, scene_atoms, confidence)
-        mask_tensor = torch.FloatTensor(mask).to(logits.device)
         
-        # 将不可行动作的logits设为-inf
+        # 将不可行动作的logits设为-inf（注意：如果mask意外全False，会导致Categorical崩溃）
         masked_logits = logits.clone()
         if logits.dim() == 1:
             masked_logits[~mask] = float('-inf')
         else:
             masked_logits[:, ~mask] = float('-inf')
+        
+        # 兜底：至少保留一个可行动作（否则分布会变成NaN）
+        if logits.dim() == 1:
+            if not torch.isfinite(masked_logits).any():
+                masked_logits = logits.clone()
+        else:
+            all_bad = ~torch.isfinite(masked_logits).any(dim=-1)
+            if all_bad.any():
+                masked_logits[all_bad] = logits[all_bad]
         
         return masked_logits
     

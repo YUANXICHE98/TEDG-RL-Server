@@ -1,0 +1,7 @@
+label,kind,points,source
+V1/embedding,per-episode,5000,ablation_v1/results/results_embedding/logs/training_log.json
+V1/extended_steps,per-episode,1000,ablation_v1/results/results_extended_steps/logs/training_log.json
+V1/fixed_th,per-episode,5000,ablation_v1/results/results_fixed_th/logs/training_log.json
+V1/full,per-episode,5000,ablation_v1/results/results_full/logs/training_log.json
+V1/no_mask,per-episode,5000,ablation_v1/results/results_no_mask/logs/training_log.json
+V1/single_ch,per-episode,5000,ablation_v1/results/results_single_ch/logs/training_log.json
