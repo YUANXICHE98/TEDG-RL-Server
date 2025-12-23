@@ -114,6 +114,12 @@ def main():
     parser.add_argument("--patience", type=int, default=5000, help="收敛检测：连续N个episode无提升则停止")
     parser.add_argument("--min-episodes", type=int, default=10000, help="最少训练episodes数（约2000万步）")
     parser.add_argument("--gumbel-tau", type=float, default=1.0, help="Gumbel温度")
+    parser.add_argument(
+        "--alpha-entropy-coef",
+        type=float,
+        default=0.0,
+        help="α(专家路由)熵正则系数；HRAMDoc 想要专家分工时建议设为 0（>0 会鼓励均匀=25%/25%/25%/25%）",
+    )
     parser.add_argument("--resume", type=str, default=None, help="恢复训练的checkpoint")
     args = parser.parse_args()
     
@@ -121,6 +127,7 @@ def main():
     print(f"实验名称: {args.exp_name}")
     print(f"训练配置: {args.episodes} episodes, {args.max_steps} steps/episode")
     print(f"架构: 4 Actors + 检索上下文 + Gumbel硬路由")
+    print(f"路由正则: alpha_entropy_coef={args.alpha_entropy_coef}")
     
     device = get_device()
     
@@ -166,6 +173,7 @@ def main():
         ppo_epochs=3,
         batch_size=128,
         device=device,
+        alpha_entropy_coef=args.alpha_entropy_coef,
     )
     
     # 恢复checkpoint
