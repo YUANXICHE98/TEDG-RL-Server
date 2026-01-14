@@ -1,0 +1,19 @@
+============================================================
+V3 Training Summary (1000 Episodes)
+============================================================
+
+Overall Statistics:
+  Total Episodes: 1000
+  Average Reward: 7.05
+  Average Score: 8.50
+  Max Score: 207
+  Min Score: 0
+
+Phase Breakdown:
+
+  Warmup Phase (0-1000):
+    Avg Reward: 7.05
+    Avg Score: 8.50
+    Max Score: 207
+
+============================================================

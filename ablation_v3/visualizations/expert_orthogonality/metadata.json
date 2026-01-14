@@ -1,0 +1,11 @@
+{
+  "checkpoint": "ablation_v3/results/resume_500_from_100/checkpoints/checkpoint_500.pt",
+  "num_steps": 500,
+  "num_experts": 4,
+  "output_dir": "ablation_v3/visualizations/expert_orthogonality",
+  "figures": {
+    "heatmap": "ablation_v3/visualizations/expert_orthogonality/expert_activation_heatmap.png",
+    "tsne": "ablation_v3/visualizations/expert_orthogonality/expert_weights_tsne.png",
+    "combined": "ablation_v3/visualizations/expert_orthogonality/expert_orthogonality_combined.png"
+  }
+}

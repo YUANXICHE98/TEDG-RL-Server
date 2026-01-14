@@ -1,0 +1,25 @@
+{
+  "version": "Baseline (No Manager)",
+  "with_manager": false,
+  "expert_usage": {
+    "Survival": 25.8,
+    "Combat": 28.000000000000004,
+    "Exploration": 22.8,
+    "General": 23.400000000000002
+  },
+  "separation_metrics": {
+    "avg_distance": 52.13631057739258,
+    "min_distance": 45.4019660949707,
+    "separation_ratio": 130114.921875
+  },
+  "data_shape": {
+    "alpha_history": [
+      1000,
+      4
+    ],
+    "expert_weights": [
+      4,
+      1000
+    ]
+  }
+}
